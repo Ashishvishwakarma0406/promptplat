@@ -26,25 +26,19 @@ const UserSchema = new Schema(
     },
     password: { type: String, required: true, select: false },
   },
-  {
-    timestamps: true,
-    versionKey: false,
-  }
+  { timestamps: true, versionKey: false }
 );
 
-// ensure email stored lowercase and username trimmed
-UserSchema.pre("save", function preSave(next) {
+UserSchema.pre("save", function (next) {
   if (this.isModified("email") && this.email) this.email = this.email.toLowerCase().trim();
   if (this.isModified("username") && this.username) this.username = this.username.trim();
   next();
 });
 
-// instance method to compare password (works even if hash done elsewhere)
 UserSchema.methods.comparePassword = async function (candidate) {
   return bcrypt.compare(candidate, this.password);
 };
 
-// tidy returned JSON: replace _id with id, remove password
 UserSchema.set("toJSON", {
   transform(doc, ret) {
     ret.id = ret._id;
