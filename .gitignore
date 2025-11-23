@@ -41,3 +41,12 @@ yarn-error.log*
 next-env.d.ts
 
 /lib/generated/prisma
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editors
+.vscode/
+.idea/
