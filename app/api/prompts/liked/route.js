@@ -1,40 +1,29 @@
-import dbConnect from "@/lib/dbconnect";
-import Like from "@/models/like";
-import { getUserFromCookie } from "@/lib/auth";
+// app/api/prompts/liked/route.js
+import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { getUserIdFromRequest } from "@/lib/apiHelpers";
 
-export async function GET(req) {
+export async function GET() {
   try {
-    await dbConnect();
+    const userId = await getUserIdFromRequest();
+    if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    const me = await getUserFromCookie();
-    const userId = me?.id || me?._id;
-    if (!userId) {
-      return new Response(JSON.stringify({ error: "Unauthorized" }), {
-        status: 401,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-
-    // Return ONLY public, not-deleted prompts (populate owner basics)
-    const liked = await Like.find({ user: userId })
-      .populate({
-        path: "prompt",
-        match: { visibility: "public", isDeleted: { $ne: true } },
-        populate: { path: "owner", select: "name username imageUrl" },
-      })
-      .lean();
-
-    const prompts = liked.map((e) => e.prompt).filter(Boolean);
-
-    return new Response(JSON.stringify({ prompts }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
+    const liked = await prisma.like.findMany({
+      where: {},
+      include: {
+        prompt: {
+          where: { visibility: "public", isDeleted: false },
+          include: { owner: { select: { id: true, name: true, username: true } } },
+        },
+      },
+      where: { userId },
+      orderBy: { createdAt: "desc" },
     });
+
+    const prompts = liked.map((l) => l.prompt).filter(Boolean);
+    return NextResponse.json({ prompts }, { status: 200 });
   } catch (e) {
     console.error("GET /api/prompts/liked error:", e);
-    return new Response(JSON.stringify({ error: "Failed to fetch liked prompts" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    return NextResponse.json({ error: "Failed to fetch liked prompts" }, { status: 500 });
   }
 }

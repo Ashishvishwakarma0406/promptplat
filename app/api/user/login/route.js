@@ -2,79 +2,53 @@
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import dbConnect from "@/lib/dbconnect";
-import User from "@/models/user";
+import { prisma } from "@/lib/prisma";
 
-const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT_SECRET_KEY || null;
-const attempts = global.__loginAttempts || new Map();
-global.__loginAttempts = attempts;
-const MAX_ATTEMPTS = 5;
-const BLOCK_TIME = 10 * 60 * 1000;
-
-function rateLimit(key) {
-  const now = Date.now();
-  const entry = attempts.get(key);
-  if (entry) {
-    if (now - entry.timestamp < BLOCK_TIME) {
-      if (entry.count >= MAX_ATTEMPTS) return true;
-      entry.count++;
-      attempts.set(key, entry);
-      return false;
-    } else {
-      attempts.set(key, { count: 1, timestamp: now });
-      return false;
-    }
-  }
-  attempts.set(key, { count: 1, timestamp: now });
-  return false;
-}
-
-function escapeRegExp(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT_SECRET_KEY;
+if (!JWT_SECRET) {
+  console.error("Missing JWT secret (JWT_SECRET or JWT_SECRET_KEY).");
 }
 
 export async function POST(req) {
   try {
-    await dbConnect();
-
     const body = await req.json().catch(() => null);
-    if (!body) return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+    if (!body) {
+      return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+    }
 
-    const inputRaw = (body.email || body.usernameEmail || body.username || body.login || "").trim();
+    const input = (body.email || body.username || body.usernameEmail || "").trim();
     const password = body.password;
-    if (!inputRaw || !password) return NextResponse.json({ error: "Email/username and password are required" }, { status: 400 });
-
-    if (!JWT_SECRET) return NextResponse.json({ error: "Server configuration error" }, { status: 500 });
-    if (rateLimit(inputRaw)) return NextResponse.json({ error: "Too many attempts. Try again later." }, { status: 429 });
-
-    const isEmail = inputRaw.includes("@");
-    const normalizedEmail = isEmail ? inputRaw.toLowerCase().trim() : null;
-    const usernameSearch = isEmail ? null : inputRaw.trim();
-
-    const or = [];
-    if (normalizedEmail) {
-      or.push({ email: normalizedEmail });
-      or.push({ email: { $regex: new RegExp(`^${escapeRegExp(normalizedEmail)}$`, "i") } });
-      or.push({ username: normalizedEmail });
-    }
-    if (usernameSearch) {
-      or.push({ username: { $regex: new RegExp(`^${escapeRegExp(usernameSearch)}$`, "i") } });
-      or.push({ email: { $regex: new RegExp(`^${escapeRegExp(usernameSearch)}$`, "i") } });
+    if (!input || !password) {
+      return NextResponse.json({ error: "Email/username and password are required" }, { status: 400 });
     }
 
-    if (!or.length) return NextResponse.json({ error: "Invalid email/username or password" }, { status: 401 });
+    const isEmail = input.includes("@");
+    const normalizedEmail = isEmail ? input.toLowerCase() : null;
+    const usernameSearch = isEmail ? null : input;
 
-    const user = await User.findOne({ $or: or }).select("+password").lean();
-    if (!user) return NextResponse.json({ error: "Invalid email/username or password" }, { status: 401 });
+    // find user (include password)
+    const user = await prisma.user.findFirst({
+      where: isEmail
+        ? { email: normalizedEmail }
+        : { username: usernameSearch },
+      select: { id: true, email: true, username: true, name: true, password: true }
+    });
 
-    const match = await bcrypt.compare(password, user.password).catch((e) => { console.error("bcrypt error:", e); return false; });
-    if (!match) return NextResponse.json({ error: "Invalid email/username or password" }, { status: 401 });
+    if (!user || !user.password) {
+      return NextResponse.json({ error: "Invalid email/username or password" }, { status: 401 });
+    }
 
-    const token = jwt.sign({ id: user._id, email: user.email }, JWT_SECRET, { expiresIn: "7d" });
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) {
+      return NextResponse.json({ error: "Invalid email/username or password" }, { status: 401 });
+    }
+
+    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: "7d" });
+
     const response = NextResponse.json({
       success: true,
       message: "Login successful",
-      user: { id: user._id, email: user.email, username: user.username, name: user.name },
+      user: { id: user.id, email: user.email, username: user.username, name: user.name }
     }, { status: 200 });
 
     response.cookies.set("token", token, {
@@ -82,12 +56,23 @@ export async function POST(req) {
       secure: process.env.NODE_ENV === "production",
       maxAge: 7 * 24 * 60 * 60,
       sameSite: "lax",
-      path: "/",
+      path: "/"
     });
 
     return response;
   } catch (err) {
-    console.error("login error:", err);
+    console.error("POST /api/user/login error:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
+}
+
+export async function GET() {
+  try {
+    // return current user if cookie exists
+    // cookie helper not available here, use next/headers.cookies in other file (me route) if preferred
+    return NextResponse.json({ error: "Method not allowed" }, { status: 405 });
+  } catch (err) {
+    console.error("GET /api/user/login error:", err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

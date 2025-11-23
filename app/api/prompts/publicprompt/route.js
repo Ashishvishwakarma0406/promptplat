@@ -1,69 +1,57 @@
 // app/api/prompts/publicprompt/route.js
-import dbConnect from "@/lib/dbconnect";
-import Prompt from "@/models/prompt";
+import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
 
 export async function GET(req) {
   try {
-    await dbConnect();
-
     const { searchParams } = new URL(req.url);
-    const { sanitizeSearchQuery, sanitizeString } = await import("@/lib/validation");
-    
-    const rawQ = searchParams.get("q")?.trim() || "";
-    const q = sanitizeSearchQuery(rawQ); // Prevent regex injection
-    const category = sanitizeString(searchParams.get("category")?.trim() || "", 50);
+    const rawQ = (searchParams.get("q") || "").trim();
+    const category = (searchParams.get("category") || "").trim();
     const sort = (searchParams.get("sort") || "recent").toLowerCase();
     const limit = Math.min(parseInt(searchParams.get("limit") || "20", 10), 50);
     const cursor = Math.max(parseInt(searchParams.get("cursor") || "0", 10), 0);
-    const sample = searchParams.get("sample"); // "1" for first paint
+    const sample = searchParams.get("sample");
 
-    const where = { visibility: "public" };
-    if (q) where.title = { $regex: q, $options: "i" };
-    if (category) where.category = category;
-
-    // FIRST-LOAD SAMPLE: only when no q & no category & cursor===0
-    if ((sample === "1" || sample === "true") && !q && !category && cursor === 0) {
-      // Use aggregation sample for quick diverse results
-      const pipeline = [
-        { $match: { visibility: "public" } },
-        { $sample: { size: limit } },
-      ];
-
-      const raw = await Prompt.aggregate(pipeline);
-      // Populate owner after aggregate
-      const items = await Prompt.populate(raw, { path: "owner" });
-
-      const total = await Prompt.countDocuments({ visibility: "public" });
-      return Response.json({
-        prompts: items,
-        total,
-        nextCursor: limit, // next page starts after sample
-        hasMore: limit < total,
-      });
+    // sample branch: random
+    if ((sample === "1" || sample === "true") && !rawQ && !category && cursor === 0) {
+      // Prisma doesn't have a portable random sample; use raw SQL for random sample
+      const rows = await prisma.$queryRawUnsafe(
+        `SELECT * FROM "Prompt" WHERE "visibility" = 'public' AND "isDeleted" = false ORDER BY RANDOM() LIMIT ${limit}`
+      );
+      // fetch owners
+      const items = await Promise.all(rows.map(async (r) => {
+        const owner = await prisma.user.findUnique({ where: { id: r.ownerId }, select: { id: true, name: true, username: true } });
+        return { ...r, owner };
+      }));
+      const total = await prisma.prompt.count({ where: { visibility: "public", isDeleted: false } });
+      return NextResponse.json({ prompts: items, total, nextCursor: limit, hasMore: limit < total }, { status: 200 });
     }
 
-    // NORMAL PAGING
-    const sortSpec =
-      sort === "likes" ? { likes: -1, createdAt: -1 } : { createdAt: -1, _id: -1 };
+    const where = { visibility: "public", isDeleted: false };
+    if (rawQ) where.title = { contains: rawQ, mode: "insensitive" };
+    if (category) where.category = category;
+
+    const orderBy = sort === "likes" ? [{ likesCount: "desc" }, { createdAt: "desc" }] : [{ createdAt: "desc" }];
 
     const [items, total] = await Promise.all([
-      Prompt.find(where)
-        .sort(sortSpec)
-        .skip(cursor)
-        .limit(limit)
-        .populate("owner")
-        .lean(),
-      Prompt.countDocuments(where),
+      prisma.prompt.findMany({
+        where,
+        orderBy,
+        skip: cursor,
+        take: limit,
+        include: { owner: { select: { id: true, name: true, username: true } } },
+      }),
+      prisma.prompt.count({ where }),
     ]);
 
-    return Response.json({
+    return NextResponse.json({
       prompts: items,
       total,
       nextCursor: cursor + items.length,
       hasMore: cursor + items.length < total,
-    });
+    }, { status: 200 });
   } catch (e) {
-    console.error("GET /api/prompts/publicprompt error:", e);
-    return Response.json({ error: "Failed to fetch public prompts" }, { status: 500 });
+    console.error("GET publicprompt error:", e);
+    return NextResponse.json({ error: "Failed to fetch public prompts" }, { status: 500 });
   }
 }

@@ -1,67 +1,55 @@
-import dbConnect from "@/lib/dbconnect";
-import Prompt from "@/models/prompt";
+// app/api/prompts/new/route.js
+import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
 import cloudinary from "@/lib/cloudinary";
+import { getUserIdFromRequest } from "@/lib/apiHelpers";
 
-export const runtime = "nodejs"; // required for Cloudinary streams (not Edge)
+export const runtime = "nodejs";
 
 export async function POST(req) {
   try {
-    await dbConnect();
+    const userId = await getUserIdFromRequest();
+    if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const form = await req.formData();
 
-    // Required fields
-    const owner = form.get("owner"); // must be a valid user _id
-    const title = form.get("title");
-    const category = form.get("category");
-    const visibility = form.get("visibility") || "private";
-    const promptText = form.get("prompt"); // from your form; we save to promptContent
+    const owner = userId; // use authenticated user
+    const title = String(form.get("title") || "").trim();
+    const category = String(form.get("category") || "").trim();
+    const visibility = String(form.get("visibility") || "private");
+    const promptText = String(form.get("prompt") || "").trim();
 
-    if (!owner || !title || !category || !promptText) {
-      return new Response(
-        JSON.stringify({ error: "owner, title, category, and prompt are required" }),
-        { status: 400 }
-      );
-    }
+    if (!title || !category || !promptText) return NextResponse.json({ error: "title, category, and prompt required" }, { status: 400 });
 
-    // Upload files -> media URLs
-    const mediaFiles = form.getAll("files").filter(Boolean);
+    const files = form.getAll("files").filter((f) => f && typeof f.arrayBuffer === "function");
     const mediaUrls = [];
 
-    for (const file of mediaFiles) {
-      // file is a web File
+    for (const file of files) {
       const arrayBuffer = await file.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
-
-      const resource_type = file.type?.startsWith("video/")
-        ? "video"
-        : file.type?.startsWith("image/")
-        ? "image"
-        : "auto";
-
+      const resource_type = file.type?.startsWith("video/") ? "video" : (file.type?.startsWith("image/") ? "image" : "auto");
       const uploaded = await new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          { folder: "promteplat/prompts", resource_type },
-          (error, result) => (error ? reject(error) : resolve(result))
-        );
+        const stream = cloudinary.uploader.upload_stream({ folder: "promteplat/prompts", resource_type }, (err, res) => (err ? reject(err) : resolve(res)));
         stream.end(buffer);
       });
-
       mediaUrls.push(uploaded.secure_url);
     }
 
-    const created = await Prompt.create({
-      owner,
-      title,
-      category,
-      visibility,
-      promptContent: String(promptText),
-      media: mediaUrls, // array of string URLs
+    const created = await prisma.prompt.create({
+      data: {
+        ownerId: owner,
+        title,
+        category,
+        visibility,
+        promptContent: promptText,
+        media: mediaUrls,
+      },
+      include: { owner: { select: { id: true, name: true, username: true } } },
     });
 
-    return new Response(JSON.stringify(created), { status: 201 });
+    return NextResponse.json(created, { status: 201 });
   } catch (err) {
-    console.error("POST /api/myprompt/new error:", err);
-    return new Response(JSON.stringify({ error: "Failed to create prompt" }), { status: 500 });
+    console.error("POST /api/prompts/new error:", err);
+    return NextResponse.json({ error: "Failed to create prompt" }, { status: 500 });
   }
 }

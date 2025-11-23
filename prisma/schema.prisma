@@ -1,0 +1,63 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  name      String
+  username  String   @unique
+  email     String   @unique
+  password  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  prompts   Prompt[]
+  likes     Like[]
+}
+
+model OTP {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  code      String
+  createdAt DateTime @default(now())
+}
+
+model Prompt {
+  id            String    @id @default(uuid())
+  ownerId       String
+  owner         User      @relation(fields: [ownerId], references: [id])
+  title         String
+  category      String
+  visibility    String    @default("private")
+  promptContent String
+  media         Json? // Cloudinary URLs array
+  likesCount    Int       @default(0) // global like counter
+  isDeleted     Boolean   @default(false)
+  deletedAt     DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // relation to Like model (opposite of Like.prompt)
+  likes Like[] @relation("PromptLikes")
+
+  @@index([ownerId, createdAt])
+  @@index([visibility, createdAt])
+  @@index([visibility, likesCount, createdAt])
+  @@index([visibility, category])
+  @@index([isDeleted])
+}
+
+model Like {
+  id        String   @id @default(uuid())
+  userId    String
+  promptId  String
+  user      User     @relation(fields: [userId], references: [id])
+  prompt    Prompt   @relation("PromptLikes", fields: [promptId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@unique([userId, promptId])
+}

@@ -1,54 +1,31 @@
-import dbConnect from "../../../../lib/dbconnect";
-import User from "../../../../models/user";
+// app/api/user/update-profile/route.js
+import { NextResponse } from "next/server";
+import prisma from "@/lib/prisma";
 import bcrypt from "bcryptjs";
 
 export async function PUT(req) {
   try {
-    await dbConnect();
+    const body = await req.json().catch(() => null);
+    if (!body) return NextResponse.json({ error: "Invalid request" }, { status: 400 });
 
-    const { email, password, name } = await req.json();
+    const { email, password, name } = body;
+    if (!email || !password || !name) return NextResponse.json({ error: "Email, password, and name are required." }, { status: 400 });
 
-    if (!email || !password || !name) {
-      return new Response(
-        JSON.stringify({ error: "Email, password, and name are required." }),
-        { status: 400 }
-      );
-    }
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) return NextResponse.json({ error: "User not found." }, { status: 404 });
 
-    // Find user by email
-    const user = await User.findOne({ email });
-    if (!user) {
-      return new Response(
-        JSON.stringify({ error: "User not found." }),
-        { status: 404 }
-      );
-    }
-
-    // Verify password
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return new Response(
-        JSON.stringify({ error: "Invalid password." }),
-        { status: 401 }
-      );
-    }
+    if (!isMatch) return NextResponse.json({ error: "Invalid password." }, { status: 401 });
 
-    // Update name
-    user.name = name;
-    await user.save();
+    const updated = await prisma.user.update({
+      where: { email },
+      data: { name },
+      select: { email: true, name: true },
+    });
 
-    return new Response(
-      JSON.stringify({
-        message: "Profile updated successfully.",
-        user: { email: user.email, name: user.name },
-      }),
-      { status: 200 }
-    );
+    return NextResponse.json({ message: "Profile updated successfully.", user: updated }, { status: 200 });
   } catch (err) {
     console.error("Update Profile Error:", err);
-    return new Response(
-      JSON.stringify({ error: "Internal server error." }),
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Internal server error." }, { status: 500 });
   }
 }

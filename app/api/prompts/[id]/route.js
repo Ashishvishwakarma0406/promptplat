@@ -1,262 +1,122 @@
 // app/api/prompts/[id]/route.js
-import dbConnect from "@/lib/dbconnect";
-import Prompt from "@/models/prompt";
+import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { getUserIdFromRequest } from "@/lib/apiHelpers";
 import cloudinary from "@/lib/cloudinary";
 
-/** Detects if a URL points to a video resource */
-const isVideoUrl = (url) =>
-  /\.(mp4|webm|mov|m4v|ogv)$/i.test(url) || url.includes("/video/upload/");
+/* helpers */
+const isVideoUrl = (url) => /\.(mp4|webm|mov|m4v|ogv)$/i.test(url) || url.includes("/video/upload/");
 
-/** Extract Cloudinary public_id from a delivery URL
- * Works with URLs like:
- *   https://res.cloudinary.com/<cloud>/<type>/upload/<transforms...>/v123456/folder/file.ext
- * Returns: "folder/file"
- */
 function getPublicIdFromUrl(url) {
   try {
     const u = new URL(url);
-    const path = u.pathname; // /<cloud>/<type>/upload/<transform?>/v123/<folder>/file.ext
+    const path = u.pathname;
     const upIdx = path.indexOf("/upload/");
     if (upIdx === -1) return null;
-
-    let after = path.slice(upIdx + "/upload/".length); // <transform?>/v123/<folder>/file.ext
+    let after = path.slice(upIdx + "/upload/".length);
     const segs = after.split("/").filter(Boolean);
-
-    // Skip version segment if present (v123456...)
     const vIdx = segs.findIndex((s) => /^v\d+$/.test(s));
     const startIdx = vIdx !== -1 ? vIdx + 1 : 0;
-
-    const rest = segs.slice(startIdx); // e.g. ["folder","file.ext"] or ["file.ext"]
+    const rest = segs.slice(startIdx);
     if (rest.length === 0) return null;
-
-    // Strip extension from last segment
     const last = rest[rest.length - 1];
     const dot = last.lastIndexOf(".");
     rest[rest.length - 1] = dot !== -1 ? last.slice(0, dot) : last;
-
-    return rest.join("/"); // "folder/file" or "file"
+    return rest.join("/");
   } catch {
     return null;
   }
 }
 
-// ---------- GET one ----------
 export async function GET(_req, { params }) {
   try {
-    await dbConnect();
-
-    const doc = await Prompt.findById(params.id).populate("owner");
-    if (!doc) {
-      return new Response(JSON.stringify({ error: "Prompt Not Found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-
-    return new Response(JSON.stringify(doc), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
+    const doc = await prisma.prompt.findUnique({
+      where: { id: params.id },
+      include: { owner: { select: { id: true, name: true, username: true } } },
     });
+    if (!doc || doc.isDeleted) return NextResponse.json({ error: "Prompt Not Found" }, { status: 404 });
+    return NextResponse.json(doc, { status: 200 });
   } catch (err) {
-    console.error(`GET /api/prompts/${params?.id} error:`, err);
-    return new Response(JSON.stringify({ error: "Internal Server Error" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    console.error(`GET prompt ${params?.id} error:`, err);
+    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   }
 }
 
-// ---------- PATCH (partial update) ----------
 export async function PATCH(req, { params }) {
   try {
-    await dbConnect();
-
-    // Authentication check
-    const { getUserFromRequest } = await import("@/lib/auth");
-    const userPayload = await getUserFromRequest(req);
-    if (!userPayload || (!userPayload.id && !userPayload.sub && !userPayload.userId)) {
-      return new Response(JSON.stringify({ error: "Unauthorized" }), {
-        status: 401,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
+    const userId = await getUserIdFromRequest();
+    if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     let payload;
-    try {
-      payload = await req.json();
-    } catch {
-      return new Response(JSON.stringify({ error: "Invalid JSON in request body" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
+    try { payload = await req.json(); } catch { return NextResponse.json({ error: "Invalid JSON" }, { status: 400 }); }
 
-    // Load existing document first (we need current media to delete)
-    const doc = await Prompt.findById(params.id);
-    if (!doc) {
-      return new Response(JSON.stringify({ error: "Prompt Not Found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
+    const doc = await prisma.prompt.findUnique({ where: { id: params.id } });
+    if (!doc) return NextResponse.json({ error: "Prompt Not Found" }, { status: 404 });
+    if (doc.ownerId !== userId) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
-    // Authorization check: only owner can update
-    const userId = userPayload.id || userPayload.sub || userPayload.userId;
-    if (String(doc.owner) !== String(userId)) {
-      return new Response(JSON.stringify({ error: "Forbidden: You can only update your own prompts" }), {
-        status: 403,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-
-    // If media is present in payload, we treat it as a REPLACEMENT.
-    // First, best-effort delete all existing media from Cloudinary.
     if (Array.isArray(payload.media)) {
       const existing = Array.isArray(doc.media) ? doc.media : [];
-      if (existing.length) {
-        await Promise.allSettled(
-          existing.map(async (url) => {
-            const publicId = getPublicIdFromUrl(url);
-            if (!publicId) return;
-            const resource_type = isVideoUrl(url) ? "video" : "image";
-            try {
-              await cloudinary.uploader.destroy(publicId, { resource_type });
-            } catch (e) {
-              console.error("Cloudinary destroy failed on PATCH:", {
-                url,
-                publicId,
-                resource_type,
-                error: e?.message,
-              });
-            }
-          })
-        );
-      }
-      // Replace with the new media URLs
-      doc.media = payload.media;
+      await Promise.allSettled(existing.map(async (url) => {
+        const publicId = getPublicIdFromUrl(url);
+        if (!publicId) return;
+        const resource_type = isVideoUrl(url) ? "video" : "image";
+        try { await cloudinary.uploader.destroy(publicId, { resource_type }); } catch (e) {
+          console.error("Cloudinary destroy failed:", { url, publicId, e: e?.message });
+        }
+      }));
     }
 
-    // Apply other fields
-    if (payload.title !== undefined) doc.title = payload.title;
-    if (payload.category !== undefined) doc.category = payload.category;
-    if (payload.visibility !== undefined) doc.visibility = payload.visibility;
-    if (payload.prompt !== undefined) doc.promptContent = payload.prompt;
+    const data = {};
+    if (payload.media !== undefined) data.media = payload.media;
+    if (payload.title !== undefined) data.title = payload.title;
+    if (payload.category !== undefined) data.category = payload.category;
+    if (payload.visibility !== undefined) data.visibility = payload.visibility;
+    if (payload.prompt !== undefined) data.promptContent = payload.prompt;
 
-    await doc.save();
-
-    // Return populated (useful for UI)
-    const updated = await Prompt.findById(doc._id).populate("owner");
-    return new Response(JSON.stringify(updated), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
+    const updated = await prisma.prompt.update({
+      where: { id: params.id },
+      data,
+      include: { owner: { select: { id: true, name: true, username: true } } },
     });
+
+    return NextResponse.json(updated, { status: 200 });
   } catch (err) {
-    console.error(`PATCH /api/prompts/${params?.id} error:`, err);
-    return new Response(
-      JSON.stringify({ error: "Error Updating Prompt", message: err.message }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
+    console.error(`PATCH prompt ${params?.id} error:`, err);
+    return NextResponse.json({ error: "Error Updating Prompt" }, { status: 500 });
   }
 }
 
-// ---------- DELETE (hard delete removes Cloudinary media too) ----------
 export async function DELETE(req, { params }) {
   try {
-    await dbConnect();
+    const userId = await getUserIdFromRequest();
+    if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    // Authentication check
-    const { getUserFromRequest } = await import("@/lib/auth");
-    const userPayload = await getUserFromRequest(req);
-    if (!userPayload || (!userPayload.id && !userPayload.sub && !userPayload.userId)) {
-      return new Response(JSON.stringify({ error: "Unauthorized" }), {
-        status: 401,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
+    const url = new URL(req.url);
+    const hard = url.searchParams.get("hard");
 
-    const { searchParams } = new URL(req.url);
-    const hard = searchParams.get("hard");
+    const doc = await prisma.prompt.findUnique({ where: { id: params.id } });
+    if (!doc) return NextResponse.json({ error: "Prompt Not Found" }, { status: 404 });
+    if (doc.ownerId !== userId) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     if (hard === "1" || hard === "true") {
-      // Hard delete: destroy media on Cloudinary, then remove document
-      const doc = await Prompt.findById(params.id);
-      if (!doc) {
-        return new Response(JSON.stringify({ error: "Prompt Not Found" }), {
-          status: 404,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-
-      // Authorization check: only owner can delete
-      const userId = userPayload.id || userPayload.sub || userPayload.userId;
-      if (String(doc.owner) !== String(userId)) {
-        return new Response(JSON.stringify({ error: "Forbidden: You can only delete your own prompts" }), {
-          status: 403,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-
       const media = Array.isArray(doc.media) ? doc.media : [];
-      if (media.length) {
-        await Promise.allSettled(
-          media.map(async (url) => {
-            const publicId = getPublicIdFromUrl(url);
-            if (!publicId) return;
-            const resource_type = isVideoUrl(url) ? "video" : "image";
-            try {
-              await cloudinary.uploader.destroy(publicId, { resource_type });
-            } catch (e) {
-              console.error("Cloudinary destroy failed on DELETE:", {
-                url,
-                publicId,
-                resource_type,
-                error: e?.message,
-              });
-            }
-          })
-        );
-      }
+      await Promise.allSettled(media.map(async (url) => {
+        const publicId = getPublicIdFromUrl(url);
+        if (!publicId) return;
+        const resource_type = isVideoUrl(url) ? "video" : "image";
+        try { await cloudinary.uploader.destroy(publicId, { resource_type }); } catch (e) {
+          console.error("Cloudinary destroy failed:", { url, publicId, e: e?.message });
+        }
+      }));
 
-      await Prompt.findByIdAndDelete(params.id);
-      return new Response(
-        JSON.stringify({ message: "Prompt and media permanently deleted", hardDeleted: true }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
-      );
+      await prisma.prompt.delete({ where: { id: params.id } });
+      return NextResponse.json({ message: "Prompt and media permanently deleted", hardDeleted: true }, { status: 200 });
     }
 
-    // Soft delete (if your schema has these fields)
-    const doc = await Prompt.findById(params.id);
-    if (!doc) {
-      return new Response(JSON.stringify({ error: "Prompt Not Found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-
-    // Authorization check: only owner can delete
-    const userId = userPayload.id || userPayload.sub || userPayload.userId;
-    if (String(doc.owner) !== String(userId)) {
-      return new Response(JSON.stringify({ error: "Forbidden: You can only delete your own prompts" }), {
-        status: 403,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-
-    const updated = await Prompt.findByIdAndUpdate(
-      params.id,
-      { isDeleted: true, deletedAt: new Date() },
-      { new: true }
-    );
-
-    return new Response(JSON.stringify({ message: "Prompt moved to trash", hardDeleted: false }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    await prisma.prompt.update({ where: { id: params.id }, data: { isDeleted: true, deletedAt: new Date() } });
+    return NextResponse.json({ message: "Prompt moved to trash", hardDeleted: false }, { status: 200 });
   } catch (err) {
-    console.error(`DELETE /api/prompts/${params?.id} error:`, err);
-    return new Response(
-      JSON.stringify({ error: "Error deleting prompt", message: err.message }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
+    console.error(`DELETE prompt ${params?.id} error:`, err);
+    return NextResponse.json({ error: "Error deleting prompt" }, { status: 500 });
   }
 }
