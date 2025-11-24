@@ -1,3 +1,4 @@
+// app/api/categories/route.js
 import categories from "@/data/categories.json";
 
 export async function GET() {

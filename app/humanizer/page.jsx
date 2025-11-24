@@ -1,3 +1,4 @@
+// app/ai/humanizer/page.jsx
 "use client";
 
 import { useState } from "react";

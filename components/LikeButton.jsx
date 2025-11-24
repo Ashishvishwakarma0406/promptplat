@@ -1,84 +1,98 @@
-// components/LikeButton.jsx
 "use client";
 
 import { useEffect, useState } from "react";
 import { Heart } from "lucide-react";
 
-export default function LikeButton({ promptId, initialCount }) {
-  const [count, setCount] = useState(initialCount ?? 0);
+export default function LikeButton({ promptId, initialCount = 0 }) {
+  const [count, setCount] = useState(initialCount);
   const [liked, setLiked] = useState(false);
+  const [ready, setReady] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [loadedOnce, setLoadedOnce] = useState(false);
 
-  // Load initial liked state + authoritative count (always send cookies)
   useEffect(() => {
-    let canceled = false;
+    let cancelled = false;
 
     (async () => {
+      if (!promptId) return;
       try {
         const res = await fetch(`/api/prompts/${promptId}/like`, {
           method: "GET",
+          credentials: "include",
           cache: "no-store",
-          credentials: "include", // <-- always send cookies
         });
         if (!res.ok) return;
         const data = await res.json();
-        if (!canceled) {
-          setCount(typeof data.likes === "number" ? data.likes : (initialCount ?? 0));
+        if (!cancelled) {
+          setCount(typeof data.likes === "number" ? data.likes : initialCount);
           setLiked(!!data.liked);
-          setLoadedOnce(true);
+          setReady(true);
         }
-      } catch {
-        // ignore
+      } catch (e) {
+        // swallow network errors; leave initial values
+        console.error("LikeButton load error:", e);
       }
     })();
 
     return () => {
-      canceled = true;
+      cancelled = true;
     };
   }, [promptId, initialCount]);
 
-  const toggle = async () => {
-    if (loading) return;
+  async function toggleLike() {
+    if (loading || !promptId) return;
     setLoading(true);
     try {
       const res = await fetch(`/api/prompts/${promptId}/like`, {
         method: "POST",
-        credentials: "include", // <-- always send cookies
+        credentials: "include",
       });
 
       if (res.status === 401) {
+        // lightweight UX
         alert("Please log in to like prompts.");
         return;
       }
       if (!res.ok) {
-        const t = await res.text();
-        console.error("Toggle like failed:", t);
+        const text = await res.text().catch(() => "");
+        console.error("Like toggle failed:", text);
         return;
       }
 
       const data = await res.json();
-      if (typeof data.likes === "number") setCount(data.likes);
-      if (typeof data.liked === "boolean") setLiked(data.liked);
+      setLiked(Boolean(data.liked));
+      setCount(Math.max(0, Number(data.likes ?? 0)));
     } catch (e) {
       console.error("Toggle like error:", e);
     } finally {
       setLoading(false);
     }
-  };
+  }
+
+  // disabled placeholder while loading initial state
+  if (!ready) {
+    return (
+      <button
+        disabled
+        className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-[#3e3b4a] text-gray-400 opacity-60"
+        aria-hidden
+      >
+        <Heart className="w-4 h-4" />
+        <span>{count}</span>
+      </button>
+    );
+  }
 
   return (
     <button
-      onClick={toggle}
-      disabled={loading || !loadedOnce}
-      className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border ${
-        liked ? "border-blue-500 text-white" : "border-[#3e3b4a] text-gray-300"
-      } hover:text-white hover:border-[#8B5CF6] disabled:opacity-60`}
-      title={liked ? "Unlike" : "Like"}
+      onClick={toggleLike}
+      disabled={loading}
       aria-pressed={liked}
+      className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border transition ${
+        liked ? "border-blue-500 text-blue-300" : "border-[#3e3b4a] text-gray-300"
+      } hover:border-[#8B5CF6] hover:text-white`}
     >
       <Heart className={`w-4 h-4 ${liked ? "fill-current" : ""}`} />
-      <span className="text-sm">{count}</span>
+      <span>{count}</span>
     </button>
   );
 }

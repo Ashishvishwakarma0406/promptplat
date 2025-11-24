@@ -5,40 +5,71 @@ import { getUserIdFromRequest } from "@/lib/apiHelpers";
 
 export const runtime = "nodejs";
 
-export async function POST(req, { params }) {
+/**
+ * Helper: extract prompt id from request URL path.
+ * Works for routes like /api/prompts/{id}/like
+ */
+function extractPromptIdFromUrl(req) {
   try {
-    const userId = await getUserIdFromRequest();
+    const url = new URL(req.url);
+    const parts = url.pathname.split("/").filter(Boolean); // ['api','prompts','{id}','like']
+    const promptsIndex = parts.indexOf("prompts");
+    if (promptsIndex === -1) return null;
+    return parts[promptsIndex + 1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function POST(req) {
+  try {
+    const promptId = extractPromptIdFromUrl(req);
+    if (!promptId) return NextResponse.json({ error: "Invalid prompt id" }, { status: 400 });
+
+    const userId = await getUserIdFromRequest(req);
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    const pid = params.id;
-    const prompt = await prisma.prompt.findUnique({ where: { id: pid } });
-    if (!prompt || prompt.visibility !== "public" || prompt.isDeleted) return NextResponse.json({ error: "Prompt not found" }, { status: 404 });
+    // Validate prompt
+    const prompt = await prisma.prompt.findUnique({
+      where: { id: promptId },
+      select: { id: true, visibility: true, likesCount: true },
+    });
+    if (!prompt || prompt.visibility !== "public" || prompt.isDeleted) {
+      return NextResponse.json({ error: "Prompt not found" }, { status: 404 });
+    }
 
+    // Try create like; if unique violation -> remove like (toggle)
     try {
-      // try create like
-      await prisma.like.create({ data: { userId, promptId: pid } });
-      const after = await prisma.prompt.update({ where: { id: pid }, data: { likesCount: { increment: 1 } } });
+      await prisma.like.create({ data: { userId, promptId } });
+      const after = await prisma.prompt.update({
+        where: { id: promptId },
+        data: { likesCount: { increment: 1 } },
+        select: { likesCount: true },
+      });
       return NextResponse.json({ liked: true, likes: after.likesCount }, { status: 200 });
     } catch (err) {
-      // unique violation -> already liked => unlike
-      const code = err?.code || err?.meta?.cause;
-      // Prisma unique constraint code is P2002
+      // Prisma unique constraint is P2002
       if (err?.code === "P2002") {
-        const del = await prisma.like.deleteMany({ where: { userId, promptId: pid } });
+        // unlike: delete the like record
+        const del = await prisma.like.deleteMany({ where: { userId, promptId } });
         if (del.count === 1) {
           const after = await prisma.prompt.update({
-            where: { id: pid },
+            where: { id: promptId },
             data: { likesCount: { decrement: 1 } },
+            select: { likesCount: true },
           });
           const likes = Math.max(after.likesCount, 0);
           if (after.likesCount < 0) {
-            await prisma.prompt.update({ where: { id: pid }, data: { likesCount: 0 } });
+            // clamp to zero (defensive)
+            await prisma.prompt.update({ where: { id: promptId }, data: { likesCount: 0 } });
             return NextResponse.json({ liked: false, likes: 0 }, { status: 200 });
           }
           return NextResponse.json({ liked: false, likes }, { status: 200 });
+        } else {
+          // nothing deleted for some reason — return current value
+          const current = await prisma.prompt.findUnique({ where: { id: promptId }, select: { likesCount: true } });
+          return NextResponse.json({ liked: true, likes: current?.likesCount ?? 0 }, { status: 200 });
         }
-        const current = await prisma.prompt.findUnique({ where: { id: pid } });
-        return NextResponse.json({ liked: true, likes: current?.likesCount ?? 0 }, { status: 200 });
       }
       throw err;
     }
@@ -48,16 +79,27 @@ export async function POST(req, { params }) {
   }
 }
 
-export async function GET(req, { params }) {
+export async function GET(req) {
   try {
-    const userId = await getUserIdFromRequest();
-    const pid = params.id;
-    const prompt = await prisma.prompt.findUnique({ where: { id: pid } });
-    if (!prompt || prompt.visibility !== "public" || prompt.isDeleted) return NextResponse.json({ error: "Prompt not found" }, { status: 404 });
+    const promptId = extractPromptIdFromUrl(req);
+    if (!promptId) return NextResponse.json({ error: "Invalid prompt id" }, { status: 400 });
+
+    const userId = await getUserIdFromRequest(req); // may be null
+
+    const prompt = await prisma.prompt.findUnique({
+      where: { id: promptId },
+      select: { id: true, visibility: true, likesCount: true, isDeleted: true },
+    });
+    if (!prompt || prompt.visibility !== "public" || prompt.isDeleted) {
+      return NextResponse.json({ error: "Prompt not found" }, { status: 404 });
+    }
 
     let liked = false;
     if (userId) {
-      const like = await prisma.like.findUnique({ where: { userId_promptId: { userId, promptId: pid } } }).catch(() => null);
+      // use compound unique name from your schema: user_prompt_unique
+      const like = await prisma.like.findUnique({
+        where: { user_prompt_unique: { userId, promptId } },
+      }).catch(() => null);
       liked = !!like;
     }
 

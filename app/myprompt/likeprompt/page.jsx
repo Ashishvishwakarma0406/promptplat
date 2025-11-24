@@ -3,7 +3,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import PromptCard from "@/components/promptcard";
+import PromptCard from "@/components/PromptCard";
 import { Loader2 } from "lucide-react";
 
 export default function LikedPromptsPage() {
@@ -35,7 +35,7 @@ export default function LikedPromptsPage() {
           try {
             const data = await res.json();
             msg = data.error || msg;
-          } catch {}
+          } catch { }
           if (!cancelled) setError(msg);
           return;
         }

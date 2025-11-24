@@ -1,3 +1,4 @@
+// app/ai/rephraser/page.jsx
 "use client";
 import { useState } from "react";
 import DualView from "@/components/ai/DualView";

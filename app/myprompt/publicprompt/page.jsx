@@ -2,7 +2,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import PromptCard from "@/components/promptcard";
+import PromptCard from "@/components/PromptCard";
 import { Loader2 } from "lucide-react";
 
 export default function PublicPromptsPage() {
